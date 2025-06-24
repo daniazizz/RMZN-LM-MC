@@ -309,8 +309,7 @@ class MyCadencierClient:
                 f"{self.base_url}/stores/{store_id}/products",
                 params=params,
                 headers=product_headers,
-                timeout=60
-            )
+                timeout=60            )
             
             request_duration = time.time() - start_time
             logger.info(f"Product request completed in {request_duration:.2f} seconds with status: {response.status_code}")
@@ -319,11 +318,26 @@ class MyCadencierClient:
                 products = response.json()
                 
                 logger.info(f"Successfully retrieved {len(products)} products for store {store_id}")
-                
-                # Log a sample product for debugging
-                if products and len(products) > 0:
+                  # Log all product references
+                if products:
+                    product_refs = []
+                    for product in products[:10]:  # Show first 10
+                        original_ref = product.get('id', 'NO_ID')
+                        normalized_ref = original_ref.lstrip('0') if original_ref != '0' else '0'
+                        if original_ref != normalized_ref:
+                            product_refs.append(f"{original_ref}({normalized_ref})")
+                        else:
+                            product_refs.append(original_ref)
+                    
+                    logger.info(f"Product references received (original/normalized): {product_refs}")
+                    if len(products) > 10:
+                        logger.info(f"... and {len(products) - 10} more products")
+                    
+                    # Log a sample product for debugging
                     sample = products[0]
                     logger.info(f"Sample product: ID={sample.get('id')}, Title={sample.get('title_fr', 'N/A')[:50]}..., BasePrice={sample.get('baseAmountPrice')}")
+                else:
+                    logger.warning("No products received from API")
                 
                 # Log product count metrics
                 log_execution_metrics("products_fetched", True, len(products))
@@ -341,13 +355,25 @@ class MyCadencierClient:
             return None
 
 def get_aws_secret(secret_name: str, region_name: str = "eu-west-3") -> dict:
-    """Fetch secret from AWS Secrets Manager"""
-    client = boto3.client("secretsmanager", region_name=region_name)
-    response = client.get_secret_value(SecretId=secret_name)
-    return json.loads(response["SecretString"])
+    """Fetch secret from AWS Secrets Manager or local file for testing"""
+    # Check if running locally (boto3 not available or local files exist)
+    local_file = f"{secret_name}.json"
+    if os.path.exists(local_file):
+        logger.info(f"Using local file: {local_file}")
+        with open(local_file, 'r') as f:
+            return json.load(f)
+    
+    try:
+        import boto3
+        client = boto3.client("secretsmanager", region_name=region_name)
+        response = client.get_secret_value(SecretId=secret_name)
+        return json.loads(response["SecretString"])
+    except ImportError:
+        logger.error(f"boto3 not available and local file {local_file} not found")
+        raise FileNotFoundError(f"Cannot find {local_file} for local testing and boto3 not available")
 
 def get_google_credentials():
-    """Fetch Google API credentials from AWS Secrets Manager"""
+    """Fetch Google API credentials from AWS Secrets Manager or local file"""
     secret_json = get_aws_secret("my-google-api-credentials")
     credentials = service_account.Credentials.from_service_account_info(secret_json)
     scope = [
@@ -359,7 +385,7 @@ def get_google_credentials():
     return credentials.with_scopes(scope)
 
 def get_autogreens_config():
-    """Fetch configuration from AWS Secrets Manager"""
+    """Fetch configuration from AWS Secrets Manager or local file"""
     return get_aws_secret("autogreens-config")
 
 def create_product_lookup(products: List[Dict]) -> Dict[str, Dict]:
@@ -369,8 +395,11 @@ def create_product_lookup(products: List[Dict]) -> Dict[str, Dict]:
         # Use 'id' as the product reference (matches MC-REF in Google Sheets)
         ref = product.get('id', '').strip()
         if ref:
+            # Normalize reference - remove leading zeros for lookup
+            normalized_ref = ref.lstrip('0') if ref != '0' else '0'
+            
             # Store unit price and other useful info
-            lookup[ref] = {
+            product_data = {
                 'unit_price': product.get('baseAmountPrice', ''),  # This is the unit price
                 'sales_price': product.get('salesPrice', ''),     # This is the sales price
                 'title_fr': product.get('title_fr', ''),          # French title
@@ -379,8 +408,15 @@ def create_product_lookup(products: List[Dict]) -> Dict[str, Dict]:
                 'base_unit_nl': product.get('baseUnit_nl', ''),   # Unit (STUK, etc.)
                 'is_promo': product.get('isPromo', False),        # Promotion status
                 'status': product.get('status', ''),              # Product status
-                'last_updated': datetime.datetime.now().isoformat()
+                'last_updated': datetime.datetime.now().isoformat(),
+                'original_ref': ref  # Keep original reference for debugging
             }
+            
+            # Store using both original and normalized references for maximum compatibility
+            lookup[ref] = product_data
+            if normalized_ref != ref:
+                lookup[normalized_ref] = product_data
+                
     return lookup
 
 def extract_price_value(price_str: str) -> Optional[float]:
@@ -424,43 +460,57 @@ def update_sheet_with_mc_data(sheet, products_lookup: Dict[str, Dict], is_market
     
     # Start from row 2 (header is row 1)
     for row_idx, row_data in enumerate(data, start=2):
-        try:
-            # Get MC reference from the row (column index 2 = MC-REF)
+        try:            # Get MC reference from the row (column index 2 = MC-REF)
             mc_ref = str(row_data.get('MC-REF', '')).strip()
             
             if not mc_ref or mc_ref == '':
                 logger.debug(f"Row {row_idx}: No MC-REF found, skipping")
                 continue
+            
+            # Normalize the reference from Google Sheets (remove leading zeros)
+            normalized_mc_ref = mc_ref.lstrip('0') if mc_ref != '0' else '0'
                 
-            # Look up product in MyCadencier data
+            # Look up product in MyCadencier data (try both original and normalized)
+            product_info = None
+            lookup_ref = None
+            
             if mc_ref in products_lookup:
                 product_info = products_lookup[mc_ref]
+                lookup_ref = mc_ref
+            elif normalized_mc_ref in products_lookup:
+                product_info = products_lookup[normalized_mc_ref]
+                lookup_ref = normalized_mc_ref
+            
+            if product_info:
                 base_amount_price = product_info.get('unit_price', '')
                 
                 # Convert to float and format for sheet
-                formatted_price = format_price_for_sheet(extract_price_value(base_amount_price))
-                
-                # Update the sheet
+                formatted_price = format_price_for_sheet(extract_price_value(base_amount_price))                # Update the sheet
                 sheet.update_cell(row_idx, price_col, formatted_price)
                 sheet.update_cell(row_idx, timestamp_col, current_time)
                 
-                logger.info(f"Updated {mc_ref}: {formatted_price} (was baseAmountPrice: {base_amount_price})")
+                original_api_ref = product_info.get('original_ref', lookup_ref)
+                logger.info(f"Updated {mc_ref}: {formatted_price} (matched API ref: {original_api_ref}, baseAmountPrice: {base_amount_price})")
                 updated_count += 1
-                
-                # Small delay to avoid rate limits
-                time.sleep(0.5)
+                  # 2 second delay to avoid rate limits
+                time.sleep(2.0)
                 
             else:
                 # Product not found in MyCadencier
                 sheet.update_cell(row_idx, price_col, "Not Found")
                 sheet.update_cell(row_idx, timestamp_col, current_time)
                 logger.warning(f"Product {mc_ref} not found in MyCadencier data")
+                  # 2 second delay to avoid rate limits
+                time.sleep(2.0)
                 
         except Exception as e:
             logger.error(f"Error updating row {row_idx} (MC-REF: {mc_ref}): {e}")
             try:
                 sheet.update_cell(row_idx, price_col, "Error")
                 sheet.update_cell(row_idx, timestamp_col, f"Error: {current_time}")
+                
+                # 2 second delay to avoid rate limits even for errors
+                time.sleep(2.0)
             except:
                 pass
             error_count += 1
@@ -654,8 +704,18 @@ def handler(event, context):
 # For local testing
 if __name__ == "__main__":
     # Mock event and context for local testing
+    class MockContext:
+        aws_request_id = "local-test-request"
+        function_name = "local-test-function"
+        function_version = "local-test-version"
+    
     test_event = {}
-    test_context = {}
+    test_context = MockContext()
+    
+    logger.info("=== RUNNING IN LOCAL TESTING MODE ===")
+    logger.info("Make sure you have these files in the current directory:")
+    logger.info("  - autogreens-config.json")
+    logger.info("  - my-google-api-credentials.json")
     
     result = handler(test_event, test_context)
     print(f"Result: {json.dumps(result, indent=2)}")
