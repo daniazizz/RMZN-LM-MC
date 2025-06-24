@@ -536,21 +536,28 @@ def handler(event, context):
                 "results": {}
             }
         }
-        
-        # Process market store
+          # Process market store first
+        market_success = False
         try:
-            logger.info("Processing market store...")
+            logger.info("=== Processing MARKET store ===")
             market_success = process_mycadencier_store(mc_client, config, "market", sheet)
             results["body"]["results"]["market"] = "success" if market_success else "failed"
+            logger.info(f"Market store processing completed: {'SUCCESS' if market_success else 'FAILED'}")
         except Exception as e:
             logger.error(f"Error processing market store: {e}")
             results["body"]["results"]["market"] = f"error: {str(e)}"
         
-        # Process express store (if different credentials exist)
+        # Wait 10 seconds before processing express store to avoid API rate limiting
+        logger.info("Waiting 10 seconds before processing express store...")
+        time.sleep(10)
+        
+        # Process express store second
+        express_success = False
         try:
-            logger.info("Processing express store...")
+            logger.info("=== Processing EXPRESS store ===")
             express_success = process_mycadencier_store(mc_client, config, "express", sheet)
             results["body"]["results"]["express"] = "success" if express_success else "failed"
+            logger.info(f"Express store processing completed: {'SUCCESS' if express_success else 'FAILED'}")
         except Exception as e:
             logger.error(f"Error processing express store: {e}")
             results["body"]["results"]["express"] = f"error: {str(e)}"

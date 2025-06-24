@@ -29,6 +29,6 @@ jobs:
         run: |
           docker push ${{ secrets.ECR_REPOSITORY }}:latest
 
-      - name: Update Lambda function with new image
-        run: |
-          aws lambda update-function-code --function-name RMZN-LM-GY-MKT --image-uri ${{ secrets.ECR_REPOSITORY }}:latest
+      # - name: Update Lambda function with new image
+      #   run: |
+      #     aws lambda update-function-code --function-name RMZN-LM-GY-MKT --image-uri ${{ secrets.ECR_REPOSITORY }}:latest
