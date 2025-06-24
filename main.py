@@ -27,9 +27,17 @@ from cryptography.hazmat.primitives import serialization
 # Disable SSL warnings for custom CA bundle
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging for CloudWatch
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(name)s - %(funcName)s:%(lineno)d - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Also log to CloudWatch with structured logging
+def log_execution_metrics(store_type: str, success: bool, products_count: int = 0, updated_count: int = 0, error_count: int = 0):
+    """Log structured metrics for CloudWatch monitoring"""
+    logger.info(f"EXECUTION_METRICS: store={store_type}, success={success}, products={products_count}, updated={updated_count}, errors={error_count}")
 
 # Constants for column indexes
 MC_REF = 2  # MyCadencier reference column
@@ -42,14 +50,15 @@ DEBUG = os.getenv("DEBUG", False)
 
 def get_server_certificate_chain(hostname, port=443):
     """Get the complete certificate chain from the server"""
+    logger.info(f"Downloading certificate chain for {hostname}:{port}")
     try:
         # Create SSL context that doesn't verify certificates
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        
-        # Connect and get certificates
+          # Connect and get certificates
         with socket.create_connection((hostname, port), timeout=10) as sock:
+            logger.debug(f"Connected to {hostname}:{port}")
             with context.wrap_socket(sock, server_hostname=hostname) as ssock:
                 # Get the peer certificate in DER format
                 der_cert = ssock.getpeercert(binary_form=True)
@@ -60,6 +69,7 @@ def get_server_certificate_chain(hostname, port=443):
                 # Convert to PEM format
                 pem_cert = cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
                 
+                logger.info("Successfully retrieved server certificate")
                 return [pem_cert]
     except Exception as e:
         logger.warning(f"Error getting certificate chain: {e}")
@@ -210,8 +220,7 @@ class MyCadencierClient:
             'Sec-CH-UA-Mobile': '?0',
             'Sec-CH-UA-Platform': '"macOS"',
             'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'cors',            'Sec-Fetch-Site': 'same-origin',
         })
 
     def _random_delay(self, min_seconds: float = 1.0, max_seconds: float = 3.0):
@@ -222,7 +231,7 @@ class MyCadencierClient:
 
     def authenticate(self, username: str, password: str, store: str) -> bool:
         """Authenticate with the mycadencier API"""
-        logger.info("Starting MyCadencier authentication...")
+        logger.info(f"Starting MyCadencier authentication for user: {username[:3]}*** in store: {store}")
         
         # Add authentication-specific headers
         auth_headers = {
@@ -232,12 +241,14 @@ class MyCadencierClient:
             'Token': 'null'
         }
         
-        # Prepare authentication payload
+        # Prepare authentication payload (don't log password)
         auth_payload = {
             "username": username,
             "password": password,
             "store": store
         }
+        
+        logger.info(f"Sending authentication request to {self.base_url}/authentication/authenticate")
         
         try:
             self._random_delay(1.0, 2.0)
@@ -249,6 +260,8 @@ class MyCadencierClient:
                 timeout=30
             )
             
+            logger.info(f"Authentication response status: {response.status_code}")
+            
             if response.status_code == 200:
                 auth_data = response.json()
                 
@@ -258,17 +271,19 @@ class MyCadencierClient:
                     self.stores = auth_data.get('stores', [])
                     
                     logger.info(f"Authentication successful for user: {self.username}")
-                    logger.info(f"Available stores: {len(self.stores)}")
+                    logger.info(f"Available stores: {len(self.stores)} - Store IDs: {[store.get('id', 'unknown') for store in self.stores[:3]]}")
                     
                     # Update session headers with token
                     self.session.headers.update({'Token': self.token})
                     
                     return True
                 else:
-                    logger.error("Authentication failed: User not authenticated")
+                    error_msg = auth_data.get('message', 'Unknown authentication error')
+                    logger.error(f"Authentication failed: {error_msg}")
                     return False
             else:
                 logger.error(f"Authentication failed with status code: {response.status_code}")
+                logger.error(f"Response body: {response.text[:200]}...")  # Log first 200 chars
                 return False
                 
         except requests.exceptions.RequestException as e:
@@ -281,7 +296,7 @@ class MyCadencierClient:
             logger.error("No authentication token available. Please authenticate first.")
             return None
 
-        logger.info(f"Fetching products for store {store_id}...")
+        logger.info(f"Fetching products for store {store_id} with metier_id {metier_id}")
         
         # Add product-specific headers
         product_headers = {
@@ -296,15 +311,21 @@ class MyCadencierClient:
             "metierId": metier_id
         }
         
+        logger.info(f"Sending product request to {self.base_url}/product/getProducts")
+        
         try:
             self._random_delay(2.0, 4.0)
             
+            start_time = time.time()
             response = self.session.post(
                 f"{self.base_url}/product/getProducts",
                 json=product_payload,
                 headers=product_headers,
                 timeout=60
             )
+            
+            request_duration = time.time() - start_time
+            logger.info(f"Product request completed in {request_duration:.2f} seconds with status: {response.status_code}")
             
             if response.status_code == 200:
                 products_data = response.json()
@@ -320,21 +341,26 @@ class MyCadencierClient:
                     logger.info(f"Response keys: {list(products_data.keys()) if isinstance(products_data, dict) else 'Not a dict'}")
                     products = []
                 
-                logger.info(f"Successfully retrieved {len(products)} products")
+                logger.info(f"Successfully retrieved {len(products)} products for store {store_id}")
                 
                 # Log a sample product for debugging
                 if products and len(products) > 0:
                     sample = products[0]
-                    logger.info(f"Sample product: ID={sample.get('id')}, Title={sample.get('title_fr')}, BasePrice={sample.get('baseAmountPrice')}")
+                    logger.info(f"Sample product: ID={sample.get('id')}, Title={sample.get('title_fr', 'N/A')[:50]}..., BasePrice={sample.get('baseAmountPrice')}")
+                
+                # Log product count metrics
+                log_execution_metrics("products_fetched", True, len(products))
                 
                 return products
             else:
                 logger.error(f"Failed to get products. Status code: {response.status_code}")
-                logger.error(f"Response: {response.text}")
+                logger.error(f"Response body: {response.text[:300]}...")  # Log first 300 chars
+                log_execution_metrics("products_fetched", False, 0)
                 return None
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {e}")
+            logger.error(f"Product request failed: {e}")
+            log_execution_metrics("products_fetched", False, 0)
             return None
 
 def get_aws_secret(secret_name: str, region_name: str = "eu-west-3") -> dict:
@@ -467,13 +493,16 @@ def update_sheet_with_mc_data(sheet, products_lookup: Dict[str, Dict], is_market
 
 def process_mycadencier_store(client: MyCadencierClient, config: dict, store_type: str, sheet) -> bool:
     """Process a specific MyCadencier store (market or express)"""
+    logger.info(f"=== Starting {store_type.upper()} store processing ===")
+    
     is_market = store_type == "market"
-      # Get credentials for the store type
+    
+    # Get credentials for the store type
     if is_market:
         username = config.get('mc_username_market')
         password = config.get('mc_password_market')
         store_code = config.get('mc_shop_id_market', '0538')
-        target_store_id = config.get('mc_target_store_id_market', '011431')
+        target_store_id = config.get('mc_target_store_id_market', '010538')
     else:
         username = config.get('mc_username_express')
         password = config.get('mc_password_express')
@@ -482,96 +511,166 @@ def process_mycadencier_store(client: MyCadencierClient, config: dict, store_typ
     
     if not all([username, password]):
         logger.error(f"Missing credentials for {store_type} store")
+        log_execution_metrics(store_type, False, 0, 0, 1)
         return False
     
-    logger.info(f"Processing {store_type} store (ID: {target_store_id})...")
+    logger.info(f"Processing {store_type} store - Store code: {store_code}, Target ID: {target_store_id}")
     
     # Authenticate
+    auth_start = time.time()
     if not client.authenticate(username, password, store_code):
         logger.error(f"Failed to authenticate for {store_type} store")
+        log_execution_metrics(store_type, False, 0, 0, 1)
         return False
     
+    auth_duration = time.time() - auth_start
+    logger.info(f"Authentication completed in {auth_duration:.2f} seconds")
+    
     # Get products
+    products_start = time.time()
     products = client.get_products(target_store_id)
     if not products:
         logger.error(f"Failed to get products for {store_type} store")
+        log_execution_metrics(store_type, False, 0, 0, 1)
         return False
     
+    products_duration = time.time() - products_start
+    logger.info(f"Product retrieval completed in {products_duration:.2f} seconds")
+    
     # Create product lookup
+    lookup_start = time.time()
     products_lookup = create_product_lookup(products)
-    logger.info(f"Created lookup for {len(products_lookup)} products")
+    lookup_duration = time.time() - lookup_start
+    logger.info(f"Created lookup for {len(products_lookup)} products in {lookup_duration:.2f} seconds")
     
     # Update sheet
+    update_start = time.time()
     updated, errors = update_sheet_with_mc_data(sheet, products_lookup, is_market)
+    update_duration = time.time() - update_start
     
+    logger.info(f"Sheet update completed in {update_duration:.2f} seconds")
     logger.info(f"{store_type.title()} store processing complete: {updated} updated, {errors} errors")
+    
+    # Log execution metrics
+    log_execution_metrics(store_type, True, len(products), updated, errors)
+    
     return True
 
 def handler(event, context):
     """AWS Lambda handler function"""
-    logger.info("Starting MyCadencier Lambda function...")
+    execution_start = time.time()
+    logger.info("=== MyCadencier Lambda function started ===")
+    logger.info(f"Lambda request ID: {context.aws_request_id if context else 'local-test'}")
+    logger.info(f"Lambda function name: {context.function_name if context else 'local-test'}")
+    logger.info(f"Lambda function version: {context.function_version if context else 'local-test'}")
     
     try:
         # Get configuration
+        config_start = time.time()
         config = get_autogreens_config()
-        logger.info("Configuration loaded from AWS Secrets Manager")
+        config_duration = time.time() - config_start
+        logger.info(f"Configuration loaded from AWS Secrets Manager in {config_duration:.2f} seconds")
         
         # Set up Google Sheets client
+        sheets_start = time.time()
         creds = get_google_credentials()
         client = gspread.authorize(creds)
-        logger.info("Google Sheets client authorized")
+        sheets_duration = time.time() - sheets_start
+        logger.info(f"Google Sheets client authorized in {sheets_duration:.2f} seconds")
         
         # Open the spreadsheet
+        sheet_start = time.time()
         sheet_name = config.get('spreadsheet_name', 'DIALNA-ASSORTIMENT')
         sheet = client.open(sheet_name).get_worksheet(0)
-        logger.info(f"Opened spreadsheet: {sheet_name}")
-          # Initialize MyCadencier client with SSL verification enabled
+        sheet_duration = time.time() - sheet_start
+        logger.info(f"Opened spreadsheet '{sheet_name}' in {sheet_duration:.2f} seconds")
+        
+        # Initialize MyCadencier client with SSL verification enabled
+        ssl_start = time.time()
         mc_client = MyCadencierClient(verify_ssl=True)
+        ssl_duration = time.time() - ssl_start
+        logger.info(f"MyCadencier client initialized with SSL in {ssl_duration:.2f} seconds")
         
         results = {
             "statusCode": 200,
             "body": {
                 "message": "MyCadencier data update completed",
                 "timestamp": datetime.datetime.now().isoformat(),
-                "results": {}
+                "execution_start": datetime.datetime.fromtimestamp(execution_start).isoformat(),
+                "results": {},
+                "timing": {
+                    "config_load": config_duration,
+                    "sheets_auth": sheets_duration,
+                    "sheet_open": sheet_duration,
+                    "ssl_init": ssl_duration
+                }
             }
         }
-          # Process market store first
+        
+        # Process market store first
+        market_start = time.time()
         market_success = False
         try:
             logger.info("=== Processing MARKET store ===")
             market_success = process_mycadencier_store(mc_client, config, "market", sheet)
+            market_duration = time.time() - market_start
             results["body"]["results"]["market"] = "success" if market_success else "failed"
-            logger.info(f"Market store processing completed: {'SUCCESS' if market_success else 'FAILED'}")
+            results["body"]["timing"]["market_processing"] = market_duration
+            logger.info(f"Market store processing completed in {market_duration:.2f} seconds: {'SUCCESS' if market_success else 'FAILED'}")
         except Exception as e:
-            logger.error(f"Error processing market store: {e}")
+            market_duration = time.time() - market_start
+            logger.error(f"Error processing market store after {market_duration:.2f} seconds: {e}")
             results["body"]["results"]["market"] = f"error: {str(e)}"
+            results["body"]["timing"]["market_processing"] = market_duration
         
         # Wait 10 seconds before processing express store to avoid API rate limiting
-        logger.info("Waiting 10 seconds before processing express store...")
+        delay_start = time.time()
+        logger.info("Waiting 10 seconds before processing express store to avoid API rate limiting...")
         time.sleep(10)
+        delay_duration = time.time() - delay_start
+        results["body"]["timing"]["inter_store_delay"] = delay_duration
         
         # Process express store second
+        express_start = time.time()
         express_success = False
         try:
             logger.info("=== Processing EXPRESS store ===")
             express_success = process_mycadencier_store(mc_client, config, "express", sheet)
+            express_duration = time.time() - express_start
             results["body"]["results"]["express"] = "success" if express_success else "failed"
-            logger.info(f"Express store processing completed: {'SUCCESS' if express_success else 'FAILED'}")
+            results["body"]["timing"]["express_processing"] = express_duration
+            logger.info(f"Express store processing completed in {express_duration:.2f} seconds: {'SUCCESS' if express_success else 'FAILED'}")
         except Exception as e:
-            logger.error(f"Error processing express store: {e}")
+            express_duration = time.time() - express_start
+            logger.error(f"Error processing express store after {express_duration:.2f} seconds: {e}")
             results["body"]["results"]["express"] = f"error: {str(e)}"
+            results["body"]["timing"]["express_processing"] = express_duration
         
-        logger.info("MyCadencier Lambda function completed successfully")
+        total_duration = time.time() - execution_start
+        results["body"]["timing"]["total_execution"] = total_duration
+        
+        # Log final execution summary
+        logger.info("=== MyCadencier Lambda function completed ===")
+        logger.info(f"Total execution time: {total_duration:.2f} seconds")
+        logger.info(f"Market success: {market_success}, Express success: {express_success}")
+        
+        # Log overall execution metrics
+        overall_success = market_success and express_success
+        log_execution_metrics("overall", overall_success)
+        
         return results
         
     except Exception as e:
-        logger.error(f"Lambda function failed: {e}")
+        total_duration = time.time() - execution_start
+        logger.error(f"Lambda function failed after {total_duration:.2f} seconds: {e}")
+        log_execution_metrics("overall", False, 0, 0, 1)
         return {
             "statusCode": 500,
             "body": {
                 "error": str(e),
-                "timestamp": datetime.datetime.now().isoformat()
+                "timestamp": datetime.datetime.now().isoformat(),
+                "execution_start": datetime.datetime.fromtimestamp(execution_start).isoformat(),
+                "execution_duration": total_duration
             }
         }
 
