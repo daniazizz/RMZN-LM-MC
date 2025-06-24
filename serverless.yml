@@ -1,4 +1,4 @@
-service: mycadencier-lambda
+service: docker-selenium-lambda
 
 provider:
   name: aws
@@ -11,13 +11,9 @@ provider:
         platform: linux/amd64
 
 functions:
-  mycadencier-updater:
-    timeout: 900 # 15 minutes to handle all API calls and sheet updates
-    memorySize: 1024 # Sufficient for HTTP requests and JSON processing
+  demo:
+    timeout: 60
+    # If you experience any errors such as Chrome crashing or not being available you might need to increase the storage available to your Lambda Function. See #102
+    memorySize: 2048
     image:
       name: img
-    events:
-      - schedule:
-          rate: rate(6 hours) # Run every 6 hours
-          enabled: true
-          description: "Scrape MyCadencier data and update Google Sheets every 6 hours"
