@@ -56,7 +56,8 @@ def get_server_certificate_chain(hostname, port=443):
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-          # Connect and get certificates
+        
+        # Connect and get certificates
         with socket.create_connection((hostname, port), timeout=10) as sock:
             logger.debug(f"Connected to {hostname}:{port}")
             with context.wrap_socket(sock, server_hostname=hostname) as ssock:
@@ -163,21 +164,8 @@ def create_complete_ca_bundle(hostname="mycadencier.carrefour.eu"):
         # Fall back to standard certifi bundle
         return certifi.where()
 
-def get_ssl_context() -> Optional[ssl.SSLContext]:
-    """
-    Create SSL context with proper certificate verification
-    """
-    try:
-        context = ssl.create_default_context()
-        context.check_hostname = True
-        context.verify_mode = ssl.CERT_REQUIRED
-        return context
-    except Exception as e:
-        logger.warning(f"Error creating SSL context: {e}")
-        return None
-
 class MyCadencierClient:
-    """MyCadencier API Client for Lambda environment"""
+    """MyCadencier API Client for Lambda environment - matching working implementation"""
     
     def __init__(self, verify_ssl: bool = True, ca_bundle: str = None):
         self.base_url = "https://mycadencier.carrefour.eu"
@@ -209,7 +197,7 @@ class MyCadencierClient:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             logger.warning("SSL certificate verification disabled")
         
-        # Set up session headers to mimic real browser
+        # Set up session headers to mimic real browser (matching working implementation)
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
@@ -220,7 +208,8 @@ class MyCadencierClient:
             'Sec-CH-UA-Mobile': '?0',
             'Sec-CH-UA-Platform': '"macOS"',
             'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
         })
 
     def _random_delay(self, min_seconds: float = 1.0, max_seconds: float = 3.0):
@@ -230,10 +219,10 @@ class MyCadencierClient:
         time.sleep(delay)
 
     def authenticate(self, username: str, password: str, store: str) -> bool:
-        """Authenticate with the mycadencier API"""
+        """Authenticate with the mycadencier API - matching working implementation"""
         logger.info(f"Starting MyCadencier authentication for user: {username[:3]}*** in store: {store}")
         
-        # Add authentication-specific headers
+        # Add authentication-specific headers (matching working implementation)
         auth_headers = {
             'Content-Type': 'application/json;charset=UTF-8',
             'Origin': self.base_url,
@@ -241,7 +230,7 @@ class MyCadencierClient:
             'Token': 'null'
         }
         
-        # Prepare authentication payload (don't log password)
+        # Prepare authentication payload
         auth_payload = {
             "username": username,
             "password": password,
@@ -291,35 +280,34 @@ class MyCadencierClient:
             return False
 
     def get_products(self, store_id: str, metier_id: str = "13") -> Optional[List[Dict]]:
-        """Retrieve products for a specific store"""
+        """Retrieve products for a specific store - FIXED to match working implementation"""
         if not self.token:
             logger.error("No authentication token available. Please authenticate first.")
             return None
 
         logger.info(f"Fetching products for store {store_id} with metier_id {metier_id}")
         
-        # Add product-specific headers
+        # Add referer header for product request (matching working implementation)
         product_headers = {
-            'Content-Type': 'application/json;charset=UTF-8',
-            'Origin': self.base_url,
-            'Referer': f'{self.base_url}/client/',
+            'Referer': f'{self.base_url}/client/'
         }
         
-        # Prepare request payload
-        product_payload = {
-            "storeId": store_id,
-            "metierId": metier_id
+        # Prepare query parameters (matching working implementation)
+        params = {
+            'metierId': metier_id,
+            'userID': self.username
         }
         
-        logger.info(f"Sending product request to {self.base_url}/product/getProducts")
+        logger.info(f"Sending product request to {self.base_url}/stores/{store_id}/products")
         
         try:
             self._random_delay(2.0, 4.0)
             
             start_time = time.time()
-            response = self.session.post(
-                f"{self.base_url}/product/getProducts",
-                json=product_payload,
+            # FIXED: Use GET method with /stores/{store_id}/products endpoint
+            response = self.session.get(
+                f"{self.base_url}/stores/{store_id}/products",
+                params=params,
                 headers=product_headers,
                 timeout=60
             )
@@ -328,18 +316,7 @@ class MyCadencierClient:
             logger.info(f"Product request completed in {request_duration:.2f} seconds with status: {response.status_code}")
             
             if response.status_code == 200:
-                products_data = response.json()
-                
-                # The MyCadencier API returns an array of products directly
-                # or sometimes wrapped in a "products" key
-                if isinstance(products_data, list):
-                    products = products_data
-                elif isinstance(products_data, dict) and 'products' in products_data:
-                    products = products_data['products']
-                else:
-                    logger.warning("Unexpected response format from MyCadencier API")
-                    logger.info(f"Response keys: {list(products_data.keys()) if isinstance(products_data, dict) else 'Not a dict'}")
-                    products = []
+                products = response.json()
                 
                 logger.info(f"Successfully retrieved {len(products)} products for store {store_id}")
                 
