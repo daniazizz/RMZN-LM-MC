@@ -1,0 +1,23 @@
+service: mycadencier-lambda
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'prod'}
+  region: ${env:AWS_REGION, 'eu-west-3'} # Set the default region to Paris (eu-west-3)
+  ecr:
+    images:
+      img:
+        path: ./
+        platform: linux/amd64
+
+functions:
+  mycadencier-updater:
+    timeout: 900 # 15 minutes to handle all API calls and sheet updates
+    memorySize: 1024 # Sufficient for HTTP requests and JSON processing
+    image:
+      name: img
+    events:
+      - schedule:
+          rate: rate(6 hours) # Run every 6 hours
+          enabled: true
+          description: "Scrape MyCadencier data and update Google Sheets every 6 hours"

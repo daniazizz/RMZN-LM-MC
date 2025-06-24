@@ -1,0 +1,34 @@
+name: Build and Deploy to Lambda
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Log in to Amazon ECR
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region ${{ secrets.AWS_REGION }}
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REPOSITORY }}
+
+      - name: Build Docker image
+        run: |
+          docker build -t my-lambda-image .
+          docker tag my-lambda-image:latest ${{ secrets.ECR_REPOSITORY }}:latest
+
+      - name: Push Docker image to Amazon ECR
+        run: |
+          docker push ${{ secrets.ECR_REPOSITORY }}:latest
+
+      - name: Update Lambda function with new image
+        run: |
+          aws lambda update-function-code --function-name RMZN-LM-GY-MKT --image-uri ${{ secrets.ECR_REPOSITORY }}:latest
